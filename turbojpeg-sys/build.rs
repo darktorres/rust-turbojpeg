@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> Result<()> {
-    println!("cargo:rerun-if-changed=build.rs");
+    rerun_triggers()?;
     let link_kind = get_link_kind()?;
     let library = build_or_find_library(link_kind)?;
     generate_or_copy_bindings(&library)?;
@@ -22,6 +22,31 @@ fn main() -> Result<()> {
         println!("cargo:include={}", include_paths.join(","));
     }
 
+    Ok(())
+}
+
+// photo-gallery: local change (not in upstream 1.2.0). Cargo reruns this script when a file's mtime is newer than its last
+// run, and a fresh checkout sets every mtime. With TURBOJPEG_SYS_INPUTS_HASH set (`just` sets it: tools/content-hash.ps1
+// hashes this crate's files by content), the rerun is decided by that value instead, so a checkout that only touches the
+// files does not rerun it, and an edit does. Without it (a plain `cargo build`), the file lines stand.
+const INPUTS_HASH: &str = "TURBOJPEG_SYS_INPUTS_HASH";
+
+fn inputs_hashed() -> bool {
+    env::var(INPUTS_HASH).is_ok_and(|v| !v.is_empty())
+}
+
+fn rerun_triggers() -> Result<()> {
+    if inputs_hashed() {
+        println!("cargo:rerun-if-env-changed={INPUTS_HASH}");
+        // Naming no file makes cargo scan the whole package by mtime. This stamp keeps the scan off. Cargo compares
+        // mtimes with the time the last run started, so a stamp written during a run would make the next one rerun; its
+        // mtime is set to the epoch instead, which no run or checkout can make newer.
+        let stamp = PathBuf::from(env::var_os("OUT_DIR").context("OUT_DIR")?).join("inputs.stamp");
+        fs::File::create(&stamp)?.set_modified(std::time::UNIX_EPOCH)?;
+        println!("cargo:rerun-if-changed={}", stamp.display());
+    } else {
+        println!("cargo:rerun-if-changed=build.rs");
+    }
     Ok(())
 }
 
@@ -160,6 +185,9 @@ fn build_vendor(link_kind: LinkKind) -> Result<Library> {
     // Let's remain consistent across build targets and set the libdir ourselves,
     // instead of trying to figure out where to find the libs based on the target
     cmake.define("CMAKE_INSTALL_DEFAULT_LIBDIR", "lib");
+    // photo-gallery: local change (not in upstream 1.2.0): libjpeg-turbo links its objects against the static C runtime (/MT) unless
+    // this is ON. The app links the dynamic one (/MD), so the two would be mixed into one binary (LNK4098). Use /MD.
+    cmake.define("WITH_CRT_DLL", "ON");
     if cfg!(feature = "require-simd") {
         cmake.configure_arg("-DREQUIRE_SIMD=ON");
     }
@@ -245,7 +273,9 @@ fn copy_pregenerated_bindings() -> Result<()> {
     let out_path = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let crate_path = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     fs::copy(crate_path.join("bindings.rs"), out_path.join("bindings.rs"))?;
-    println!("cargo:rerun-if-changed={}", crate_path.join("bindings.rs").to_str().unwrap());
+    if !inputs_hashed() {
+        println!("cargo:rerun-if-changed={}", crate_path.join("bindings.rs").to_str().unwrap());
+    }
     Ok(())
 }
 
@@ -263,7 +293,9 @@ fn generate_bindings(library: &Library) -> Result<()> {
     for path in library.include_paths.iter() {
         let path = path.to_str().unwrap();
         builder = builder.clang_arg(format!("-I{}", path));
-        println!("cargo:rerun-if-changed={}", path);
+        if !inputs_hashed() {
+            println!("cargo:rerun-if-changed={}", path);
+        }
     }
 
     for (name, value) in library.defines.iter() {
