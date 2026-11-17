@@ -163,6 +163,16 @@ fn build_vendor(link_kind: LinkKind) -> Result<Library> {
     // photo-gallery: local change (not in upstream 1.2.0): libjpeg-turbo links its objects against the static C runtime (/MT) unless
     // this is ON. The app links the dynamic one (/MD), so the two would be mixed into one binary (LNK4098). Use /MD.
     cmake.define("WITH_CRT_DLL", "ON");
+    // photo-gallery: local change (not in upstream 1.2.0): the cmake crate (0.1.58, `set_compiler`) defines
+    // CMAKE_C_FLAGS_<CONFIG> from cc's flags, which are /Od under opt_level 0, and that replaces CMake's own
+    // /O2 /Ob2 /DNDEBUG: the MSVC build of the C was unoptimized (`CL.command.1.tlog`: no /O2). Defining the variables
+    // here, before the crate does, keeps CMake's optimization flags; the crate leaves a defined variable alone.
+    // /Zi (RelWithDebInfo) and /MD are kept as the crate passed them.
+    if env("CARGO_CFG_TARGET_ENV").unwrap() == "msvc" {
+        cmake.define("CMAKE_C_FLAGS_RELEASE", "/MD /O2 /Ob2 /DNDEBUG");
+        cmake.define("CMAKE_C_FLAGS_RELWITHDEBINFO", "/Zi /MD /O2 /Ob2 /DNDEBUG");
+        cmake.define("CMAKE_C_FLAGS_MINSIZEREL", "/MD /O1 /Ob1 /DNDEBUG");
+    }
     if cfg!(feature = "require-simd") {
         cmake.configure_arg("-DREQUIRE_SIMD=ON");
     }
